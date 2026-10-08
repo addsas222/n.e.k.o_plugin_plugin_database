@@ -91,6 +91,19 @@ numpy / pyyaml 不在本插件依赖里。
 > 注意 vec0 是 `cp311-win_amd64` 二进制：`pyproject.toml` 因此把
 > `requires-python` 收紧到 `>=3.11,<3.12`，3.12+ 上 ABI 不匹配会静默失效。
 
+## 测试
+
+```bash
+uv run neko-plugin sync plugin_database   # 先补齐 vendor/，否则见下
+python -m pytest tests -q
+python tests/stub_run.py                  # 桩链路检查（16 项）
+```
+
+> **`vendor/` 缺失时测试会失败**，报 `ModuleNotFoundError: No module named
+> 'aiosqlite'`（`tests/conftest.py` 把 `vendor/` 加进 `sys.path`，
+> 见其文件头说明）。这不是测试本身的问题 —— SQLite 适配器依赖 `aiosqlite`，
+> 而它随 `vendor/` 分发。先跑一次 `neko-plugin sync` 即可。
+
 ## hot_knowledge 表结构
 
 任务书 schema + 一处显式扩展：`status TEXT NOT NULL DEFAULT 'active'`
