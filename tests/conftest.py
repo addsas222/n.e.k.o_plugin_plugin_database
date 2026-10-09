@@ -15,8 +15,10 @@
 
 from __future__ import annotations
 
+import importlib
 import sys
 import types
+import warnings as _warnings
 from pathlib import Path
 
 _PLUGIN_ROOT = Path(__file__).resolve().parents[1]      # .../plugins/plugin_database
@@ -34,7 +36,9 @@ def _ensure_plugins_namespace() -> None:
     而它依赖的 ``plugin.sdk`` 由宿主 SDK 提供（需 PYTHONPATH 指向 N.E.K.O 根）。
     """
     try:
-        import plugin  # noqa: F401
+        # 用 import_module 而不是 import 语句：这个绑定随后要 setattr，
+        # 而 ``import plugin`` 形式在「先绑定后赋值」的写法下会被判为未使用。
+        plugin = importlib.import_module("plugin")
     except Exception:
         return  # 没有宿主 SDK：让测试以清晰的 ModuleNotFoundError 失败
 
@@ -65,12 +69,12 @@ _ensure_plugins_namespace()
 #   宿主自带 lifekit 套件在本机同样触发（环境固有，非插件缺陷）。
 # ---------------------------------------------------------------------------
 
-import warnings as _warnings  # noqa: E402
-
 with _warnings.catch_warnings():
     _warnings.filterwarnings("ignore", message=r"plugin\.settings\.PLUGIN_CONFIG_ROOT is deprecated")
     try:
-        import plugin.settings  # noqa: F401
+        # 只为副作用导入（触发弃用警告的首次注册）；用 import_module
+        # 而非 import 语句，避免把「按副作用导入」写成未使用的绑定。
+        importlib.import_module("plugin.settings")
     except Exception:
         pass
 
