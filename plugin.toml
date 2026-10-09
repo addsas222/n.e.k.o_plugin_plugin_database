@@ -26,6 +26,63 @@ name = "neko-plugin"
 recommended = ">=0.1.0,<0.2.0"
 supported = ">=0.1.0,<0.3.0"
 
+# 静态声明入口（只写 id + name，其余元数据仍以 @plugin_entry 装饰器为准）。
+# 宿主重扫插件时只认 plugin.meta.json / 这里的声明来重建入口列表；不写的话
+# 一次 /plugins/refresh 就会把入口清空，面板 action 全部 404。
+# tests/test_manifest_entries.py 校验这里与装饰器保持一致。
+
+[[plugin.entries]]
+id = "db_execute"
+name = "执行 SQL"
+
+[[plugin.entries]]
+id = "db_fetch_all"
+name = "查询多行"
+
+[[plugin.entries]]
+id = "db_fetch_one"
+name = "查询单行"
+
+[[plugin.entries]]
+id = "db_transaction"
+name = "批量事务"
+
+[[plugin.entries]]
+id = "db_status"
+name = "数据库状态"
+
+[[plugin.entries]]
+id = "db_capabilities"
+name = "驱动能力"
+
+[[plugin.entries]]
+id = "db_switch_driver"
+name = "切换驱动"
+
+[[plugin.entries]]
+id = "register_hot_schema"
+name = "注册热数据表"
+
+[[plugin.entries]]
+id = "hot_promote"
+name = "写入热知识"
+
+[[plugin.entries]]
+id = "hot_demote"
+name = "冷数据降级"
+
+[[plugin.entries]]
+id = "hot_query"
+name = "查询热知识"
+
+[[plugin.entries]]
+id = "skill_stat_record"
+name = "记录 Skill 调用"
+
+[[plugin.entries]]
+id = "skill_stat_query"
+name = "查询 Skill 统计"
+
 [plugin_runtime]
 enabled = true
 auto_start = false
