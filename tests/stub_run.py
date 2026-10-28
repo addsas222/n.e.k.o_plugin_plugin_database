@@ -14,7 +14,10 @@
   * db_execute / db_fetch_all / db_fetch_one 走 sqlite 真实读写
   * register_hot_schema -> hot_promote -> hot_query -> hot_demote 全链路
   * skill_stat_record / skill_stat_query 落库
-  * db_switch_driver 对坏 DSN 返回 Err（结构化错误），恢复 sqlite 后继续可用
+  * db_switch_driver 对坏 DSN（postgres / neo4j）返回 Err（结构化错误），恢复 sqlite 后继续可用
+  * 图库/KV 驱动下 hot_* 入口返回 Err
+  * db_drivers 列出 9 个驱动；sqlalchemy(sqlite) 上 hot_* / skill_stat_* 可用
+  * 设置 NEKO_TEST_MONGO_URI / NEKO_TEST_MONGO_DB 时：入口层在真实 MongoDB 上全链路（含 db_transaction 提交/回滚）
 
 用法： 任意 Python 3.11+: python tests\\stub_run.py
 """
@@ -253,6 +256,37 @@ async def main() -> int:
 
     r = await plugin.db_switch_driver({"driver": "postgres", "postgres": {"dsn": "postgresql://u:p@127.0.0.1:1/none"}})
     check(isinstance(r, Err), "switch to unreachable driver -> Err(结构化)", repr(r))
+    r = await plugin.db_switch_driver({"driver": "neo4j", "neo4j": {"uri": "bolt://127.0.0.1:1", "connect_timeout": 2}})
+    check(isinstance(r, Err), "switch to unreachable neo4j -> Err(结构化)", repr(r))
+    plugin._service.adapter.driver = "redis"  # 只看入口守卫，不连真实 redis
+    r = await plugin.hot_query(limit=10)
+    del plugin._service.adapter.driver
+    check(isinstance(r, Err) and "does not support" in str(r.error), "hot_query on redis -> Err", repr(r))
+    r = await plugin.db_drivers()
+    by = {d["driver"]: d for d in r.value["drivers"]} if isinstance(r, Ok) else {}
+    check(len(by) == 9 and by["sqlalchemy"]["available"] and by["http"]["available"], "db_drivers lists 9 drivers", repr(r)[:300])
+
+    # sqlalchemy 连 sqlite：hot_* / skill_stat_* 按 sqlite 方言族可用
+    sa_url = "sqlite:///" + (storage / "sa.db").as_posix()
+    r = await plugin.db_switch_driver({"driver": "sqlalchemy", "sqlalchemy": {"url": sa_url}})
+    check(isinstance(r, Ok) and r.value["driver"] == "sqlalchemy", "switch to sqlalchemy(sqlite)", repr(r))
+    r = await plugin.hot_promote(content_hash="sa1", content="via sqlalchemy", embedding=[0.1])
+    check(isinstance(r, Ok) and r.value["rowcount"] == 1, "sqlalchemy hot_promote", repr(r))
+    r = await plugin.hot_query(limit=5)
+    check(isinstance(r, Ok) and r.value["count"] == 1, "sqlalchemy hot_query", repr(r))
+    await plugin.skill_stat_record(skill="sa", duration_ms=4, ok=True)
+    r = await plugin.skill_stat_query()
+    check(isinstance(r, Ok) and r.value["rows"][0]["calls"] == 1, "sqlalchemy skill stats", repr(r))
+    r = await plugin.db_switch_driver({"driver": "http", "http": {"base_url": "http://127.0.0.1:1", "timeout": 2}})
+    check(isinstance(r, Err), "switch to unreachable http -> Err(结构化)", repr(r))
+
+    import os
+
+    if os.environ.get("NEKO_TEST_MONGO_URI") and os.environ.get("NEKO_TEST_MONGO_DB"):
+        await _mongo_path(plugin, Ok, Err, os.environ["NEKO_TEST_MONGO_URI"], os.environ["NEKO_TEST_MONGO_DB"])
+    else:
+        print("[SKIP] mongo entry path (NEKO_TEST_MONGO_URI / NEKO_TEST_MONGO_DB not set)")
+
     r = await plugin.db_switch_driver({"driver": "sqlite", "sqlite": {"path": str(storage / "plugin_database.db")}})
     check(isinstance(r, Ok) and r.value["driver"] == "sqlite", "switch back to sqlite", repr(r))
     r = await plugin.db_fetch_one("SELECT 1 AS x", [])
@@ -265,6 +299,56 @@ async def main() -> int:
     failed = [x for x in RESULTS if not x[0]]
     print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} checks passed", flush=True)
     return 1 if failed else 0
+
+
+async def _mongo_path(plugin, Ok, Err, uri: str, db: str) -> None:
+    """入口层在真实 MongoDB 上跑一遍（只碰 hot_knowledge / skill_stats / neko_stub_t，结束时 drop）。"""
+    import json
+
+    def op(**kw):
+        return json.dumps(kw)
+
+    r = await plugin.db_switch_driver({"driver": "mongo", "mongo": {"uri": uri, "database": db}})
+    check(isinstance(r, Ok) and r.value["driver"] == "mongo", "switch to mongo", repr(r))
+    if not isinstance(r, Ok):
+        return
+    mdb = plugin._service.adapter._db
+    try:
+        for name in ("hot_knowledge", "skill_stats", "neko_stub_t"):
+            await mdb[name].delete_many({})
+        r = await plugin.register_hot_schema()
+        check(isinstance(r, Ok) and r.value.get("collection") == "hot_knowledge", "mongo register_hot_schema", repr(r))
+        r = await plugin.hot_promote(content_hash="m1", content="mongo 热知识", embedding=[0.5, 0.25],
+                                     last_hit_at="2000-01-01T00:00:00")
+        check(isinstance(r, Ok) and r.value["rowcount"] == 1, "mongo hot_promote", repr(r))
+        r = await plugin.hot_query(limit=5)
+        check(isinstance(r, Ok) and r.value["count"] == 1 and r.value["rows"][0]["embedding"] == [0.5, 0.25],
+              "mongo hot_query", repr(r))
+        r = await plugin.hot_demote(demotion_days=1)
+        check(isinstance(r, Ok) and r.value["demoted"] == 1, "mongo hot_demote", repr(r))
+        await plugin.skill_stat_record(skill="s", duration_ms=10, ok=True)
+        await plugin.skill_stat_record(skill="s", duration_ms=30, ok=False)
+        r = await plugin.skill_stat_query()
+        row = r.value["rows"][0] if isinstance(r, Ok) and r.value["rows"] else {}
+        check(row.get("calls") == 2 and row.get("errors") == 1 and row.get("avg_ms") == 20.0, "mongo skill stats", repr(r))
+        r = await plugin.db_transaction([
+            {"sql": op(op="insert_one", collection="neko_stub_t", doc={"v": 1})},
+            {"sql": op(op="bulk_write", collection="neko_stub_t", requests=[{"op": "insert_one", "doc": {"v": 2}}])},
+        ])
+        check(isinstance(r, Ok) and r.value["rowcounts"] == [1, 1], "mongo db_transaction commit", repr(r))
+        r = await plugin.db_transaction([
+            {"sql": op(op="insert_one", collection="neko_stub_t", doc={"v": 3})},
+            {"sql": op(op="no_such_op", collection="neko_stub_t")},
+        ])
+        check(isinstance(r, Err), "mongo db_transaction failing statement -> Err", repr(r))
+        r = await plugin.db_fetch_all(op(op="count", collection="neko_stub_t", filter={}))
+        check(isinstance(r, Ok) and r.value["rows"] == [{"count": 2}], "mongo rollback kept count=2 (db_fetch_all count)", repr(r))
+        r = await plugin.db_fetch_one(op(op="aggregate", collection="neko_stub_t",
+                                         pipeline=[{"$group": {"_id": None, "s": {"$sum": "$v"}}}]))
+        check(isinstance(r, Ok) and r.value["row"] == {"_id": None, "s": 3}, "mongo db_fetch_one aggregate", repr(r))
+    finally:
+        for name in ("hot_knowledge", "skill_stats", "neko_stub_t"):
+            await mdb.drop_collection(name)
 
 
 if __name__ == "__main__":

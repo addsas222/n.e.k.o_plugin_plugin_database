@@ -79,6 +79,14 @@ async def test_sqlite_structured_error_when_not_connected():
         await a.fetch_all("SELECT 1", ())
 
 
+@pytest.mark.parametrize("vec0_path", ["", "none"])
+async def test_sqlite_require_vec0_without_extension_fails(vec0_path):
+    a = SQLiteAdapter()
+    with pytest.raises(AdapterError, match="require_vec0"):
+        await a.connect({"path": ":memory:", "vec0_path": vec0_path, "require_vec0": True})
+    await a.close()
+
+
 # ---------------------------------------------------------------------------
 # 方言差异（纯单元）
 # ---------------------------------------------------------------------------

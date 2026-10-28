@@ -95,10 +95,22 @@ MONGO_INDEXES: list[dict] = [
 ]
 
 
+#: hot_knowledge / skill_stats 的 SQL/文档方言族（入口层对其余驱动返回结构化 Err）
+HOT_DIALECTS = frozenset({"sqlite", "postgres", "mysql", "mongo"})
+
+
+def dialect_of(adapter) -> str | None:
+    """适配器所说的 hot 方言：原生驱动即 driver；sqlalchemy / odbc 由连接时探测到的
+    后端库给出 ``hot_dialect``（sqlite/postgres/mysql 之一，否则 None）。None = 不支持。"""
+    d = getattr(adapter, "hot_dialect", None) or adapter.driver
+    return d if d in HOT_DIALECTS else None
+
+
 async def register_hot_schema(adapter) -> dict:
     """在给定适配器上注册 hot_knowledge 存储结构，返回描述信息。"""
     driver = adapter.driver
-    if driver == "mongo":
+    dialect = dialect_of(adapter)
+    if dialect == "mongo":
         await adapter.execute(
             json_op_create_collection(), params=()
         )
@@ -107,9 +119,10 @@ async def register_hot_schema(adapter) -> dict:
 
             await adapter.execute(_json.dumps({"op": "create_index", "collection": MONGO_COLLECTION, **spec}), ())
         return {"driver": driver, "collection": MONGO_COLLECTION, "indexes": len(MONGO_INDEXES)}
-    statements = DDL.get(driver)
-    if statements is None:
-        raise AdapterError(f"hot_knowledge schema: unknown driver {driver!r}")
+    if dialect is None:
+        # 图库/KV/HTTP/其它 SQL 方言不建 hot_knowledge：切换驱动时不能因此报错（连接已切成功）
+        return {"driver": driver, "skipped": f"hot_knowledge is not supported on {driver}"}
+    statements = DDL[dialect]
     for stmt in statements:
         await adapter.execute(" ".join(stmt.split()), ())
     return {"driver": driver, "table": "hot_knowledge", "statements": len(statements)}

@@ -4,6 +4,7 @@ auto_start = false
 
 [database]
 driver = "sqlite"
+extra_paths = []
 
 [database.sqlite]
 path = ""
@@ -25,3 +26,40 @@ connect_timeout = 10
 [database.mongo]
 uri = ""
 database = ""
+
+[database.neo4j]
+uri = ""
+user = ""
+password = ""
+database = ""
+connect_timeout = 10
+max_pool_size = 10
+
+[database.redis]
+url = ""
+connect_timeout = 10
+
+[database.sqlalchemy]
+url = ""
+connect_args = {}
+pool_pre_ping = true
+
+[database.odbc]
+connection_string = ""
+dsn = ""
+driver = ""
+server = ""
+database = ""
+uid = ""
+pwd = ""
+timeout = 10
+
+[database.http]
+base_url = ""
+username = ""
+password = ""
+token = ""
+headers = {}
+timeout = 30
+verify_tls = true
+ping_path = "/"

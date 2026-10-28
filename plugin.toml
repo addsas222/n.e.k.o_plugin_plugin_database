@@ -3,8 +3,8 @@ id = "plugin_database"
 name = "Plugin Database"
 version = "0.1.0"
 type = "plugin"
-description = "统一数据库访问基础层：DatabaseAdapter 抽象 + SQLite（默认零配置）/ PostgreSQL / MySQL / MongoDB 四驱动，含 hot_knowledge 热数据表、Skill 调用统计表与 vec0/FTS5 能力探测，供知识库与 Skill 插件跨插件调用。"
-short_description = "Unified async database layer (SQLite default, PostgreSQL/MySQL/MongoDB) with hot_knowledge table and skill stats for other plugins."
+description = "统一数据库访问基础层：SQLite（默认零配置）/ PostgreSQL / MySQL / MongoDB / Neo4j / Redis 六个原生驱动 + SQLAlchemy / ODBC / HTTP 三个通用驱动（几乎任何数据库），含 hot_knowledge 热数据表、Skill 调用统计表与 vec0/FTS5 能力探测，供知识库与 Skill 插件跨插件调用。"
+short_description = "Unified async database layer: SQLite (default), PostgreSQL, MySQL, MongoDB, Neo4j, Redis plus generic SQLAlchemy / ODBC / HTTP drivers, with hot_knowledge table and skill stats for other plugins."
 keywords = [
     "database",
     "sqlite",
@@ -12,6 +12,11 @@ keywords = [
     "postgresql",
     "mysql",
     "mongodb",
+    "neo4j",
+    "redis",
+    "sqlalchemy",
+    "odbc",
+    "elasticsearch",
     "数据库",
     "存储",
     "hot_knowledge",
@@ -56,6 +61,10 @@ id = "db_capabilities"
 name = "驱动能力"
 
 [[plugin.entries]]
+id = "db_drivers"
+name = "驱动清单"
+
+[[plugin.entries]]
 id = "db_switch_driver"
 name = "切换驱动"
 
@@ -93,17 +102,23 @@ auto_start = false
 # ---------------------------------------------------------------------------
 
 [database]
-# sqlite | postgres | mysql | mongo
+# sqlite | postgres | mysql | mongo | neo4j | redis | sqlalchemy | odbc | http
+# hot_* / skill_stat_* 只在 sqlite/postgres/mysql 方言（含 sqlalchemy/odbc 连到这三种库）与 mongo 上可用，
+# 其余驱动只走 db_* 通用入口（hot_* / skill_stat_* 返回结构化错误）。
 driver = "sqlite"
+# 额外的 Python 包目录，启动时排在 vendor/ 之后加入 sys.path（vendor 同名包优先）。
+# 体积大/可选的驱动装在插件外，例：uv pip install --python 3.11 --target D:/neko_dbdrivers duckdb duckdb-engine
+# 然后写 extra_paths = ["D:/neko_dbdrivers"]；相对路径按插件目录解析。db_drivers 入口列出缺什么。
+extra_paths = []
 
 [database.sqlite]
 # 留空 = <插件数据目录>/data/plugin_database.db（自动创建）
 path = ""
 # vec0 向量扩展（sqlite-vec）。默认自动 = 插件 vendor/sqlite_vec/vec0.dll 的绝对路径；
 # 加载失败不影响启动（能力探测如实上报，知识库退化为 numpy 余弦扫描）。
-# 显式设为 "" 可完全禁用扩展加载；相对路径按插件目录解析。
+# 留空 = 自动（vendor/sqlite_vec/vec0.dll 若存在）；设为 "none" 完全禁用；相对路径按插件目录解析。
 vec0_path = ""
-# 设为 true 时 vec0 加载失败将阻止启动（默认 false，尽力而为）
+# 设为 true 时 vec0 加载失败或无扩展可加载（缺 DLL / "none"）将阻止启动（默认 false，尽力而为）
 require_vec0 = false
 
 [database.postgres]
@@ -119,9 +134,75 @@ min_size = 1
 max_size = 5
 
 [database.mongo]
-# 例：mongodb://127.0.0.1:27017
+# 例：mongodb://127.0.0.1:27017。兼容服务同样可用：
+#   MongoDB Atlas：mongodb+srv://user:pass@cluster0.xxxx.mongodb.net/（dnspython 已随 vendor 分发）
+#   AWS DocumentDB：mongodb://user:pass@host:27017/?tls=true&tlsCAFile=D:/global-bundle.pem&retryWrites=false
+#   Azure Cosmos DB（Mongo API）：门户里的连接串（含 ssl=true&retrywrites=false）
+#   FerretDB：mongodb://user:pass@host:27017/（事务/部分聚合算子视版本而定）
+# 多文档事务（db_transaction）要求副本集/分片集群；单机 mongod 返回结构化错误。
 uri = ""
 database = ""
+
+[database.neo4j]
+# 例：bolt://127.0.0.1:7687（或 neo4j://）。sql 传 Cypher，位置参数映射为 $p1..$pn
+uri = ""
+# user 留空 = 不认证
+user = ""
+password = ""
+# 留空 = 服务端默认库
+database = ""
+connect_timeout = 10
+max_pool_size = 10
+
+[database.redis]
+# 例：redis://127.0.0.1:6379/0（密码写成 redis://:password@host...；TLS 用 rediss://）
+# sql 传一条命令行，params 追加在末尾
+url = ""
+connect_timeout = 10
+# deny_commands 缺省 = FLUSHALL/FLUSHDB/SHUTDOWN/CONFIG/DEBUG/MONITOR/(P|S)SUBSCRIBE/
+# (P)SYNC/REPLICAOF/SLAVEOF/MIGRATE/MULTI/EXEC/DISCARD/WATCH/UNWATCH/
+# EVAL(SHA)(_RO)/FCALL(_RO)/FUNCTION/SCRIPT/SWAPDB/MODULE/ACL；显式写出则整体替换
+# deny_commands = ["FLUSHALL", "FLUSHDB"]
+
+[database.sqlalchemy]
+# 任意 SQLAlchemy URL（同步方言走线程，异步方言需 greenlet），sql 写目标库原生 SQL，占位符统一 ?。
+# 例：mssql+pyodbc://user:pass@host/db?driver=ODBC+Driver+17+for+SQL+Server
+#     oracle+oracledb://user:pass@host:1521/?service_name=XE   duckdb:///D:/data/x.duckdb
+# 除 SQLAlchemy 本体与 pyodbc 外，方言包/DBAPI 装进 [database] extra_paths。
+url = ""
+# 传给 DBAPI connect() 的参数，例：connect_args = { timeout = 10 }
+connect_args = {}
+pool_pre_ping = true
+# pool_size = 5
+# max_overflow = 10
+# pool_recycle = 1800
+
+[database.odbc]
+# 完整连接串优先；留空则用下面的分段拼接。例（CSV 文件夹，只读+INSERT，无事务）：
+#   DRIVER={Microsoft Access Text Driver (*.txt, *.csv)};DBQ=D:/data/csv
+connection_string = ""
+dsn = ""
+driver = ""
+server = ""
+database = ""
+uid = ""
+pwd = ""
+timeout = 10
+
+[database.http]
+# REST 数据库（Elasticsearch/OpenSearch、CouchDB、InfluxDB、Qdrant、Solr、ClickHouse HTTP）。
+# sql 传 JSON 请求 {"method","path","query","body"}；不支持事务。
+base_url = ""
+# Basic 认证用 username/password，Bearer 用 token（headers 里写了 Authorization 则以它为准）
+username = ""
+password = ""
+token = ""
+headers = {}
+timeout = 30
+# 自签名证书（如默认安装的 ES 8）设为 false
+verify_tls = true
+# connect 时 GET 这个路径检查连通/认证；留空跳过
+ping_path = "/"
 
 [plugin.ui]
 enabled = true

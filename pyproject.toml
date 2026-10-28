@@ -1,10 +1,12 @@
 [project]
 name = "plugin_database"
 version = "0.1.0"
-description = "N.E.K.O unified database layer: SQLite/PostgreSQL/MySQL/MongoDB adapters with hot_knowledge table"
+description = "N.E.K.O unified database layer: SQLite/PostgreSQL/MySQL/MongoDB/Neo4j/Redis adapters plus generic SQLAlchemy/ODBC/HTTP drivers, with hot_knowledge table"
 # 收紧到 <3.12：vendor 里的 vec0.dll / 扩展二进制是 cp311-win_amd64，
 # 在 3.12+ 上 ABI 不匹配，vec0 会静默失效（实测 3.14 下 no such module: vec0）。
 requires-python = ">=3.11,<3.12"
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
 dependencies = [
     "aiosqlite>=0.20",
     "asyncpg>=0.29",
@@ -13,6 +15,13 @@ dependencies = [
     "motor>=3.4",
     "pymongo>=4.6",
     "sqlite-vec>=0.1.6",
+    "neo4j>=5.28,<7",
+    # 5.0.1 起才有 aclose()（close() 会发弃用警告）
+    "redis>=5.0.1",
+    # 通用驱动：driver = "sqlalchemy" / "odbc"（http 只用标准库）。
+    # 方言包/其它 DBAPI（duckdb、oracledb、clickhouse-sqlalchemy...）不进依赖，装进 [database] extra_paths。
+    "sqlalchemy>=2.0",
+    "pyodbc>=5.1",
 ]
 
 [tool.pytest.ini_options]

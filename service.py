@@ -29,6 +29,101 @@ def ensure_vendor_path(plugin_dir: str | Path) -> bool:
     return True
 
 
+def ensure_extra_paths(plugin_dir: str | Path, paths: Any) -> list[str]:
+    """``[database] extra_paths``：装在插件目录外的可选驱动（duckdb、oracledb、方言包...）。
+
+    按配置顺序排在 ``vendor/`` 之后（vendor 里的同名包优先，避免外部旧版本顶掉已验证的依赖）；
+    相对路径按插件目录解析，不存在的目录跳过。返回实际加入的目录。
+    """
+    vendor = str(Path(plugin_dir) / "vendor")
+    pos = sys.path.index(vendor) + 1 if vendor in sys.path else 0
+    added: list[str] = []
+    for raw in paths or []:
+        p = Path(str(raw)).expanduser()
+        if not p.is_absolute():
+            p = Path(plugin_dir) / p
+        s = str(p)
+        if p.is_dir() and s not in sys.path:
+            sys.path.insert(pos + len(added), s)
+            added.append(s)
+    return added
+
+
+#: 各驱动需要能 import 的 Python 模块（http 只用标准库）
+DRIVER_MODULES: dict[str, list[str]] = {
+    "sqlite": ["aiosqlite"],
+    "postgres": ["asyncpg"],
+    "mysql": ["aiomysql", "pymysql"],
+    "mongo": ["motor", "pymongo", "dns"],
+    "neo4j": ["neo4j"],
+    "redis": ["redis"],
+    "sqlalchemy": ["sqlalchemy"],
+    "odbc": ["pyodbc"],
+    "http": [],
+}
+
+#: driver = "sqlalchemy" 时常用方言：(数据库, URL 示例, 需要的模块, pip 包)。async 方言另需 greenlet。
+SQLALCHEMY_DIALECTS: list[tuple[str, str, list[str], str]] = [
+    ("SQLite", "sqlite:///D:/data/x.db", ["sqlite3"], ""),
+    ("SQLite (async)", "sqlite+aiosqlite:///D:/data/x.db", ["aiosqlite", "greenlet"], "greenlet"),
+    ("PostgreSQL", "postgresql+psycopg://user:pass@host:5432/db", ["psycopg"], "psycopg[binary]"),
+    ("PostgreSQL (async)", "postgresql+asyncpg://user:pass@host:5432/db", ["asyncpg", "greenlet"], "greenlet"),
+    ("MySQL / MariaDB / TiDB", "mysql+pymysql://user:pass@host:3306/db", ["pymysql"], ""),
+    ("SQL Server", "mssql+pyodbc://user:pass@host/db?driver=ODBC+Driver+17+for+SQL+Server", ["pyodbc"], ""),
+    ("SQL Server (pymssql)", "mssql+pymssql://user:pass@host/db", ["pymssql"], "pymssql"),
+    ("Oracle", "oracle+oracledb://user:pass@host:1521/?service_name=XE", ["oracledb"], "oracledb"),
+    ("DuckDB", "duckdb:///D:/data/x.duckdb", ["duckdb", "duckdb_engine"], "duckdb duckdb-engine"),
+    ("ClickHouse", "clickhouse+http://user:pass@host:8123/db", ["clickhouse_sqlalchemy"], "clickhouse-sqlalchemy"),
+    ("Snowflake", "snowflake://user:pass@account/db/schema?warehouse=wh", ["snowflake.sqlalchemy"],
+     "snowflake-sqlalchemy"),
+    ("CockroachDB", "cockroachdb://user:pass@host:26257/db", ["sqlalchemy_cockroachdb", "psycopg2"],
+     "sqlalchemy-cockroachdb psycopg2-binary"),
+    ("达梦 DM", "dm+dmPython://SYSDBA:pass@host:5236", ["dmPython", "sqlalchemy_dm"], "dmPython sqlalchemy_dm（达梦安装包/官方提供）"),
+]
+
+
+def _importable(modules: list[str]) -> tuple[bool, str | None]:
+    import importlib
+
+    for mod in modules:
+        try:
+            importlib.import_module(mod)
+        except Exception as exc:  # ImportError 之外，ABI 不匹配等也算不可用
+            return False, f"{mod}: {exc}"
+    return True, None
+
+
+def driver_report(extra_paths: list[str]) -> dict:
+    """``db_drivers`` 入口的数据：每个驱动的依赖是否可 import、SQLAlchemy 方言、ODBC 驱动、安装提示。
+
+    同步函数（import 会阻塞），入口层放进线程执行。
+    """
+    target = extra_paths[0] if extra_paths else "<extra_path>"
+    hint = f'uv pip install --python 3.11 --target "{target}" '
+    drivers = []
+    for name in ADAPTERS:
+        ok, err = _importable(DRIVER_MODULES.get(name, []))
+        drivers.append({"driver": name, "available": ok, "error": err})
+    dialects = []
+    for label, url, modules, pip in SQLALCHEMY_DIALECTS:
+        ok, err = _importable(modules)
+        dialects.append({"database": label, "url": url, "available": ok, "error": err,
+                         "install": None if ok or not pip else hint + pip})
+    try:
+        import pyodbc
+
+        odbc_drivers: list[str] | str = list(pyodbc.drivers())
+    except Exception as exc:
+        odbc_drivers = f"pyodbc unavailable: {exc}"
+    return {
+        "drivers": drivers,
+        "sqlalchemy_dialects": dialects,
+        "odbc_drivers": odbc_drivers,
+        "extra_paths": extra_paths,
+        "install_hint": hint + "<package>   # 然后把该目录写进 [database] extra_paths 并重启插件",
+    }
+
+
 def encode_value(value: Any) -> Any:
     """bytes -> {"__bytes_b64__": ...}，其余透传；递归处理容器。"""
     if isinstance(value, (bytes, bytearray)):

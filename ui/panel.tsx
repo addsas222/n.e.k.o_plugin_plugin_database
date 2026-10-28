@@ -80,6 +80,13 @@ export default function Panel(props: PluginSurfaceProps<State>) {
     "has_params": false
   },
   {
+    "id": "db_drivers",
+    "name": "db_drivers",
+    "description": "",
+    "timeout": 0.0,
+    "has_params": false
+  },
+  {
     "id": "db_switch_driver",
     "name": "db_switch_driver",
     "description": "",
@@ -137,7 +144,7 @@ export default function Panel(props: PluginSurfaceProps<State>) {
   }
 
   return (
-    <Page title="Plugin Database" subtitle="统一数据库访问基础层：DatabaseAdapter 抽象 + SQLite（默认零配置）/ PostgreSQL / MySQL / MongoDB 四…">
+    <Page title="Plugin Database" subtitle="统一数据库访问基础层：SQLite / PostgreSQL / MySQL / MongoDB / Neo4j / Redis + SQLAlchemy / ODBC / HTTP 通用驱动">
       <Stack>
         {entries.map((e) => {
           const act = actionOf(e.id)

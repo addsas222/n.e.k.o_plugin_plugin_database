@@ -1,7 +1,7 @@
 """DatabaseAdapter 统一接口与错误类型。
 
-四个驱动适配器（SQLite / PostgreSQL / MySQL / MongoDB）都实现这里定义的
-``DatabaseAdapter``。约定：
+九个驱动适配器（SQLite / PostgreSQL / MySQL / MongoDB / Neo4j / Redis 原生，加上
+SQLAlchemy / ODBC / HTTP 三个通用适配器）都实现这里定义的 ``DatabaseAdapter``。约定：
 
 * ``connect(config)`` 建立连接/连接池；``config`` 由 plugin.toml 的 ``[database.*]``
   段展开而来，键名见各适配器 docstring。
@@ -11,10 +11,12 @@
   用法：``async with await adapter.transaction(): ...``。
   异常时回滚，正常退出时提交。
 * MongoDB 不支持 SQL：``sql`` 参数传 JSON 字符串编码的文档操作，
-  见 :mod:`.mongo_adapter`。
+  见 :mod:`.mongo_adapter`。Neo4j 传 Cypher（:mod:`.neo4j_adapter`），
+  Redis 传命令行（:mod:`.redis_adapter`），HTTP 传 JSON 请求（:mod:`.http_adapter`）。
 
 占位符风格：SQLite/MySQL 用 ``?``，PostgreSQL 也接受 ``?``（内部转译成 ``$n``），
-MongoDB 忽略 params。这样上层可以用同一份 SQL。
+SQLAlchemy 按方言 paramstyle 转译 ``?``，ODBC 原生 ``?``，MongoDB/HTTP 忽略 params，
+Neo4j 位置参数映射为 ``$p1..$pn``。这样上层可以用同一份 SQL。
 """
 
 from __future__ import annotations

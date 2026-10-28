@@ -107,6 +107,12 @@ class SQLiteAdapter(DatabaseAdapter):
         if vec0_path.lower() == "none":
             # 显式禁用（"none"），其余空值/缺失 = 自动
             vec0_path = ""
+        if not vec0_path and require_vec0:
+            # 缺 vendor DLL 或 "none" 与 require_vec0 互相矛盾：按配置要求阻止启动
+            raise AdapterError(
+                'require_vec0 is set but no vec0 extension path resolved '
+                '(missing vendor/sqlite_vec/vec0.dll or vec0_path="none")'
+            )
         if vec0_path and not Path(vec0_path).exists():
             if require_vec0:
                 raise AdapterError(f"vec0 extension not found: {vec0_path}")

@@ -3,18 +3,21 @@
 对外（跨插件）入口分四组：
 
 * 通用 SQL：``db_execute`` / ``db_fetch_all`` / ``db_fetch_one``
-* 能力与切换：``db_status`` / ``db_capabilities`` / ``db_switch_driver``
+* 能力与切换：``db_status`` / ``db_capabilities`` / ``db_drivers`` / ``db_switch_driver``
 * 热数据表：``register_hot_schema`` / ``hot_promote`` / ``hot_demote`` / ``hot_query``
 * Skill 统计：``skill_stat_record`` / ``skill_stat_query``
 
 驱动由 plugin.toml 的 ``[database] driver`` 选择：sqlite（默认，零配置）/
-postgres / mysql / mongo。所有入口返回 ``Ok`` / ``Err(SdkError)`` 结构化结果：
+postgres / mysql / mongo / neo4j / redis，以及三个通用驱动 sqlalchemy（任意 SQLAlchemy
+URL）/ odbc（任意 ODBC 驱动）/ http（REST 数据库）。热数据表与 Skill 统计只在
+sqlite/postgres/mysql 方言（含 sqlalchemy/odbc 连到这三种库）与 mongo 上可用，其余返回结构化 Err。所有入口返回 ``Ok`` / ``Err(SdkError)`` 结构化结果：
 适配器把驱动异常统一转成 ``AdapterError``，入口层再兜底捕获任何参数/驱动异常，
 任何失败都不会让宿主崩溃。
 """
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
 from pathlib import Path
@@ -24,11 +27,22 @@ from plugin.sdk.plugin import Err, NekoPluginBase, Ok, SdkError, lifecycle, neko
 
 from . import hot_schema
 from .adapters import AdapterError
-from .service import DatabaseService, encode_value, ensure_vendor_path
+from .service import DatabaseService, driver_report, encode_value, ensure_extra_paths, ensure_vendor_path
 
 
 def _fail(exc: BaseException) -> Err:
     return Err(SdkError(str(exc)))
+
+
+def _no_hot(adapter) -> Err | None:
+    """hot_* / skill_stat_* 只支持 sqlite/postgres/mysql/mongo 方言（含 sqlalchemy/odbc 连到这三种 SQL 库）；
+    图库/KV/HTTP/其它 SQL 方言返回 Err。"""
+    if hot_schema.dialect_of(adapter) is None:
+        return Err(SdkError(
+            f"driver {adapter.driver!r} does not support hot_knowledge / skill_stats "
+            "(needs sqlite/postgres/mysql SQL or mongo)"
+        ))
+    return None
 
 
 def _entry(fn):
@@ -51,7 +65,7 @@ def _entry(fn):
 
 @neko_plugin
 class PluginDatabasePlugin(NekoPluginBase):
-    """统一 DatabaseAdapter：SQLite / PostgreSQL / MySQL / MongoDB。"""
+    """统一 DatabaseAdapter：SQLite / PostgreSQL / MySQL / MongoDB / Neo4j / Redis + SQLAlchemy / ODBC / HTTP。"""
 
     @ui.context(id="plugin_database_panel")
     async def _ui_panel_state(self):
@@ -61,27 +75,27 @@ class PluginDatabasePlugin(NekoPluginBase):
                 'id': 'plugin_database',
                 'name': 'Plugin Database',
                 'version': '0.1.0',
-                'description': '统一数据库访问基础层：DatabaseAdapter 抽象 + SQLite（默认零配置）/ PostgreSQL / MySQL / MongoDB 四驱动，含 hot_knowledge 热数据表、Skill 调用统计表与 vec0/FTS5 能力探测，供知识库与 Skill 插件跨插件调用。',
+                'description': '统一数据库访问基础层：SQLite（默认零配置）/ PostgreSQL / MySQL / MongoDB / Neo4j / Redis 六个原生驱动 + SQLAlchemy / ODBC / HTTP 三个通用驱动（几乎任何数据库），含 hot_knowledge 热数据表、Skill 调用统计表与 vec0/FTS5 能力探测，供知识库与 Skill 插件跨插件调用。',
             },
             'entries': [
                 {
                     'id': 'db_execute',
                     'name': '执行 SQL',
-                    'description': '执行 DML/DDL，返回受影响行数（MongoDB 传 JSON 文档操作）',
+                    'description': '执行 DML/DDL，返回受影响行数（MongoDB 传 JSON 文档操作：insert/update/replace/delete/bulk_write/create_index/drop_index；HTTP 传 JSON 请求）',
                     'has_required': True,
                     'has_params': True
                 },
                 {
                     'id': 'db_fetch_all',
                     'name': '查询多行',
-                    'description': '执行 SELECT，返回全部行（bytes 字段自动 base64 包装）',
+                    'description': '执行查询，返回全部行（bytes 自动 base64 包装；MongoDB 支持 find/aggregate/distinct/count/estimated_count/list_collections/list_indexes/find_one_and_*）',
                     'has_required': True,
                     'has_params': True
                 },
                 {
                     'id': 'db_fetch_one',
                     'name': '查询单行',
-                    'description': '执行 SELECT，返回第一行或 null',
+                    'description': '执行查询，返回第一行或 null（MongoDB/HTTP 同 db_fetch_all 的操作）',
                     'has_required': True,
                     'has_params': True
                 },
@@ -103,6 +117,13 @@ class PluginDatabasePlugin(NekoPluginBase):
                     'id': 'db_capabilities',
                     'name': '驱动能力',
                     'description': '报告当前驱动的 vec0 / FTS5 能力（供知识库选择检索通道）',
+                    'has_required': False,
+                    'has_params': False
+                },
+                {
+                    'id': 'db_drivers',
+                    'name': '驱动清单',
+                    'description': '列出全部驱动及其依赖能否导入、SQLAlchemy 常用方言、本机 ODBC 驱动与安装提示',
                     'has_required': False,
                     'has_params': False
                 },
@@ -164,6 +185,8 @@ class PluginDatabasePlugin(NekoPluginBase):
         # startup 解析好的 [database.sqlite] 段（含 vec0_path / 默认库路径）。
         # db_switch_driver 只覆盖调用方显式给出的键，其余保持启动时的值。
         self._sqlite_cfg: dict[str, Any] = {}
+        # startup 时实际加入 sys.path 的 [database] extra_paths（db_drivers 据此给安装提示）
+        self._extra_paths: list[str] = []
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -173,29 +196,29 @@ class PluginDatabasePlugin(NekoPluginBase):
     async def on_startup(self, **_):
         cfg = await self.config.dump()
         db_cfg = dict(cfg.get("database") or {})
-        driver = str(db_cfg.get("driver", "sqlite")).lower()
         sqlite_cfg = dict(db_cfg.get("sqlite") or {})
-        if driver == "sqlite":
-            default_vec0 = self.plugin_dir / "vendor" / "sqlite_vec" / "vec0.dll"
-            # 语义：vec0_path 缺失或留空 = 自动（vendor 里的 vec0.dll，若存在）；
-            # "none" = 显式禁用；其他值 = 路径（相对路径按插件目录解析）
-            if "vec0_path" not in sqlite_cfg or not str(sqlite_cfg["vec0_path"]).strip():
-                if default_vec0.exists():
-                    sqlite_cfg["vec0_path"] = str(default_vec0)
-                else:
-                    sqlite_cfg.pop("vec0_path", None)
-            elif str(sqlite_cfg["vec0_path"]).strip().lower() == "none":
-                sqlite_cfg.pop("vec0_path")  # 显式禁用
+        # 无论启动驱动是什么都解析 sqlite 段：db_switch_driver 切到 sqlite 时沿用它
+        default_vec0 = self.plugin_dir / "vendor" / "sqlite_vec" / "vec0.dll"
+        # 语义：vec0_path 缺失或留空 = 自动（vendor 里的 vec0.dll，若存在）；
+        # "none" = 显式禁用；其他值 = 路径（相对路径按插件目录解析）
+        if "vec0_path" not in sqlite_cfg or not str(sqlite_cfg["vec0_path"]).strip():
+            if default_vec0.exists():
+                sqlite_cfg["vec0_path"] = str(default_vec0)
             else:
-                vp = Path(str(sqlite_cfg["vec0_path"]))
-                if not vp.is_absolute():
-                    # 模板里的相对路径按插件目录解析（进程 CWD 不可依赖）
-                    sqlite_cfg["vec0_path"] = str(self.plugin_dir / vp)
-            if not sqlite_cfg.get("path"):
-                sqlite_cfg["path"] = str(self.storage_dir / "data" / "plugin_database.db")
+                sqlite_cfg.pop("vec0_path", None)
+        elif str(sqlite_cfg["vec0_path"]).strip().lower() == "none":
+            sqlite_cfg.pop("vec0_path")  # 显式禁用
+        else:
+            vp = Path(str(sqlite_cfg["vec0_path"]))
+            if not vp.is_absolute():
+                # 模板里的相对路径按插件目录解析（进程 CWD 不可依赖）
+                sqlite_cfg["vec0_path"] = str(self.plugin_dir / vp)
+        if not sqlite_cfg.get("path"):
+            sqlite_cfg["path"] = str(self.storage_dir / "data" / "plugin_database.db")
         self._service = DatabaseService(self.storage_dir / "data")
         self._sqlite_cfg = sqlite_cfg
         ensure_vendor_path(self.plugin_dir)
+        self._extra_paths = ensure_extra_paths(self.plugin_dir, db_cfg.get("extra_paths"))
         try:
             info = await self._service.start({**db_cfg, "sqlite": sqlite_cfg})
         except AdapterError as exc:
@@ -229,7 +252,7 @@ class PluginDatabasePlugin(NekoPluginBase):
     @plugin_entry(
         id="db_execute",
         name="执行 SQL",
-        description="执行 DML/DDL，返回受影响行数（MongoDB 传 JSON 文档操作）",
+        description="执行 DML/DDL，返回受影响行数（MongoDB 传 JSON 文档操作：insert/update/replace/delete/bulk_write/create_index/drop_index；HTTP 传 JSON 请求）",
         timeout=30.0,
     )
     @_entry
@@ -249,7 +272,7 @@ class PluginDatabasePlugin(NekoPluginBase):
     @plugin_entry(
         id="db_fetch_all",
         name="查询多行",
-        description="执行 SELECT，返回全部行（bytes 字段自动 base64 包装）",
+        description="执行查询，返回全部行（bytes 自动 base64 包装；MongoDB 支持 find/aggregate/distinct/count/estimated_count/list_collections/list_indexes/find_one_and_*）",
         timeout=30.0,
     )
     @_entry
@@ -269,7 +292,7 @@ class PluginDatabasePlugin(NekoPluginBase):
     @plugin_entry(
         id="db_fetch_one",
         name="查询单行",
-        description="执行 SELECT，返回第一行或 null",
+        description="执行查询，返回第一行或 null（MongoDB/HTTP 同 db_fetch_all 的操作）",
         timeout=30.0,
     )
     @_entry
@@ -302,8 +325,8 @@ class PluginDatabasePlugin(NekoPluginBase):
 
         跨插件 IPC 无法传递事务句柄，也不提供 begin/commit/rollback 三段式
         （调用方中途失联会留下悬挂事务）；需要多条语句的原子写入请整组打包
-        到本入口。MongoDB 不支持 SQL 事务，返回结构化 Err（原子性用单文档
-        原子操作/replace upsert）。
+        到本入口。MongoDB 每条 sql 是一个 JSON 文档操作，多文档事务要求副本集
+        （单机 mongod 返回结构化 Err）；Redis 为 MULTI/EXEC；HTTP 驱动不支持事务。
         """
         svc = self._svc()
         if svc is None:
@@ -311,11 +334,6 @@ class PluginDatabasePlugin(NekoPluginBase):
         stmts = list(statements or [])
         if not stmts:
             return Err(SdkError("statements is required"))
-        if svc.driver == "mongo":
-            return Err(SdkError(
-                "mongo adapter does not support SQL transactions; "
-                "use single-document atomic operations"
-            ))
         from .service import decode_params
 
         rowcounts: list[int] = []
@@ -373,6 +391,20 @@ class PluginDatabasePlugin(NekoPluginBase):
         return Ok(caps)
 
 
+    @ui.action(label="驱动清单", tone="primary", refresh_context=True)
+
+    @plugin_entry(
+        id="db_drivers",
+        name="驱动清单",
+        description="列出全部驱动及其依赖能否导入、SQLAlchemy 常用方言、本机 ODBC 驱动与安装提示",
+        timeout=60.0,
+    )
+    @_entry
+    async def db_drivers(self, **_):
+        report = await asyncio.to_thread(driver_report, self._extra_paths)
+        svc = self._svc()
+        return Ok({"current": svc.driver if svc is not None else None, **report})
+
     @ui.action(label="切换驱动", refresh_context=True)
 
     @plugin_entry(
@@ -388,7 +420,9 @@ class PluginDatabasePlugin(NekoPluginBase):
             return Err(SdkError("database plugin not started"))
         cfg = dict(config or {})
         if not cfg.get("driver"):
-            return Err(SdkError("config.driver is required (sqlite/postgres/mysql/mongo)"))
+            return Err(SdkError(
+                "config.driver is required (sqlite/postgres/mysql/mongo/neo4j/redis/sqlalchemy/odbc/http)"
+            ))
         driver = str(cfg["driver"]).strip().lower()
         if driver == "sqlite":
             # 与 startup 解析好的 sqlite 段合并：只覆盖调用方显式给出的键，
@@ -461,6 +495,8 @@ class PluginDatabasePlugin(NekoPluginBase):
         svc = self._svc()
         if svc is None:
             return Err(SdkError("database plugin not started"))
+        if (err := _no_hot(svc.adapter)) is not None:
+            return err
         if not content_hash or not content:
             return Err(SdkError("content_hash and content are required"))
         now = hot_schema.now_iso_text()
@@ -479,7 +515,7 @@ class PluginDatabasePlugin(NekoPluginBase):
             )
         except (AdapterError, ValueError, TypeError) as exc:
             return _fail(exc)
-        driver = svc.driver
+        driver = hot_schema.dialect_of(svc.adapter)
         try:
             if driver == "sqlite":
                 n = await svc.adapter.execute(
@@ -507,7 +543,7 @@ class PluginDatabasePlugin(NekoPluginBase):
                     " VALUES (?,?,?,?,?,?,?,?, 'active', ?)",
                     params,
                 )
-            elif driver == "mongo":
+            else:  # mongo（_no_hot 已排除其它方言）
                 doc = {
                     "source": source,
                     "content_hash": content_hash,
@@ -532,11 +568,9 @@ class PluginDatabasePlugin(NekoPluginBase):
                     ),
                     (),
                 )
-            else:
-                return Err(SdkError(f"unknown driver {driver!r}"))
         except AdapterError as exc:
             return _fail(exc)
-        return Ok({"promoted": content_hash, "rowcount": n, "driver": driver})
+        return Ok({"promoted": content_hash, "rowcount": n, "driver": svc.driver})
 
 
     @ui.action(label="冷数据降级", refresh_context=True)
@@ -552,12 +586,15 @@ class PluginDatabasePlugin(NekoPluginBase):
         svc = self._svc()
         if svc is None:
             return Err(SdkError("database plugin not started"))
+        if (err := _no_hot(svc.adapter)) is not None:
+            return err
         try:
             cutoff = hot_schema.cutoff_iso(int(demotion_days))
-            if svc.driver == "mongo":
+            dialect = hot_schema.dialect_of(svc.adapter)
+            if dialect == "mongo":
                 n = await svc.adapter.execute(hot_schema.mongo_demote_op(cutoff), ())
             else:
-                sql, prm = hot_schema.demote_sql(svc.driver, cutoff)
+                sql, prm = hot_schema.demote_sql(dialect, cutoff)
                 n = await svc.adapter.execute(sql, prm)
         except AdapterError as exc:
             return _fail(exc)
@@ -581,12 +618,14 @@ class PluginDatabasePlugin(NekoPluginBase):
         svc = self._svc()
         if svc is None:
             return Err(SdkError("database plugin not started"))
+        if (err := _no_hot(svc.adapter)) is not None:
+            return err
         try:
             limit = max(1, min(int(limit), 500))
         except (TypeError, ValueError) as exc:
             return _fail(exc)
         try:
-            if svc.driver == "mongo":
+            if hot_schema.dialect_of(svc.adapter) == "mongo":
                 flt = {} if include_demoted else {"status": "active"}
                 rows = await svc.adapter.fetch_all(
                     json.dumps(
@@ -620,7 +659,7 @@ class PluginDatabasePlugin(NekoPluginBase):
         svc = self._svc()
         if svc is None:
             return
-        if svc.driver == "mongo":
+        if hot_schema.dialect_of(svc.adapter) == "mongo":
             await svc.adapter.execute(
                 json.dumps(
                     {
@@ -647,7 +686,7 @@ class PluginDatabasePlugin(NekoPluginBase):
             " errors INT NOT NULL DEFAULT 0, total_ms DOUBLE NOT NULL DEFAULT 0,"
             " last_called_at VARCHAR(40), last_ok INT NOT NULL DEFAULT 1)",
         }
-        stmt = dialect.get(svc.driver)
+        stmt = dialect.get(hot_schema.dialect_of(svc.adapter))
         if stmt:
             await svc.adapter.execute(" ".join(stmt.split()), ())
 
@@ -667,11 +706,14 @@ class PluginDatabasePlugin(NekoPluginBase):
         svc = self._svc()
         if svc is None:
             return Err(SdkError("database plugin not started"))
+        if (err := _no_hot(svc.adapter)) is not None:
+            return err
         if not skill:
             return Err(SdkError("skill name is required"))
         now = hot_schema.now_iso_text()
+        dialect = hot_schema.dialect_of(svc.adapter)
         try:
-            if svc.driver == "mongo":
+            if dialect == "mongo":
                 n = await svc.adapter.execute(
                     json.dumps(
                         {
@@ -693,11 +735,11 @@ class PluginDatabasePlugin(NekoPluginBase):
                 )
             else:
                 # 幂等 upsert：先插入占位，再累加
-                if svc.driver == "sqlite":
+                if dialect == "sqlite":
                     await svc.adapter.execute(
                         "INSERT OR IGNORE INTO skill_stats (skill) VALUES (?)", (skill,)
                     )
-                elif svc.driver == "postgres":
+                elif dialect == "postgres":
                     await svc.adapter.execute(
                         "INSERT INTO skill_stats (skill) VALUES (?)"
                         " ON CONFLICT (skill) DO NOTHING",
@@ -730,8 +772,10 @@ class PluginDatabasePlugin(NekoPluginBase):
         svc = self._svc()
         if svc is None:
             return Err(SdkError("database plugin not started"))
+        if (err := _no_hot(svc.adapter)) is not None:
+            return err
         try:
-            if svc.driver == "mongo":
+            if hot_schema.dialect_of(svc.adapter) == "mongo":
                 rows = await svc.adapter.fetch_all(
                     json.dumps({"op": "find", "collection": "skill_stats", "sort": [["calls", -1]]}),
                     (),
