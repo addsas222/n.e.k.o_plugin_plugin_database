@@ -1,6 +1,6 @@
 [project]
 name = "plugin_database"
-version = "0.1.0"
+version = "0.2.0"
 description = "N.E.K.O unified database layer: SQLite/PostgreSQL/MySQL/MongoDB/Neo4j/Redis adapters plus generic SQLAlchemy/ODBC/HTTP drivers, with hot_knowledge table"
 # 收紧到 <3.12：vendor 里的 vec0.dll / 扩展二进制是 cp311-win_amd64，
 # 在 3.12+ 上 ABI 不匹配，vec0 会静默失效（实测 3.14 下 no such module: vec0）。
