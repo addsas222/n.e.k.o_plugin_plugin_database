@@ -74,7 +74,7 @@ class PluginDatabasePlugin(NekoPluginBase):
             'plugin': {
                 'id': 'plugin_database',
                 'name': 'Plugin Database',
-                'version': '0.2.0',
+                'version': '0.2.1',
                 'description': '统一数据库访问基础层：SQLite（默认零配置）/ PostgreSQL / MySQL / MongoDB / Neo4j / Redis 六个原生驱动 + SQLAlchemy / ODBC / HTTP 三个通用驱动（几乎任何数据库），含 hot_knowledge 热数据表、Skill 调用统计表与 vec0/FTS5 能力探测，供知识库与 Skill 插件跨插件调用。',
             },
             'entries': [
