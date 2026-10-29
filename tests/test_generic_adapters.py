@@ -266,7 +266,8 @@ _AUTH = "Basic " + base64.b64encode(b"neko:secret").decode()
 
 
 class _FakeDB(BaseHTTPRequestHandler):
-    log_message = lambda *a, **k: None  # noqa: E731  静音
+    def log_message(self, *a, **k):  # 静音
+        pass
 
     def _reply(self, code: int, body, ctype="application/json"):
         raw = body if isinstance(body, bytes) else json.dumps(body).encode()

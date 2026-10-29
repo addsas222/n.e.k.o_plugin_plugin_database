@@ -24,6 +24,13 @@ dependencies = [
     "pyodbc>=5.1",
 ]
 
+# 打包时排除运行期状态目录。宿主会在插件目录下生成 config/（从 config.example.toml
+# 复制）与 data/（真实数据库文件），它们已在 .gitignore 里，但打包器不读 gitignore，
+# 只认这里 —— 不排除的话本地出包会把当前数据库塞进 zip，且 *.db-shm 是全零文件，
+# 压缩比远超 200:1 的门禁上限，check --release 会直接失败。
+[tool.neko.build]
+exclude_dirs = ["data", "config", "cache"]
+
 [tool.pytest.ini_options]
 
 # 警告一律按错误处理。两个显式豁免（均为宿主/环境所有，非插件缺陷）：
