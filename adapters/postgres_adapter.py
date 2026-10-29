@@ -46,7 +46,10 @@ class _PgTransaction(TransactionHandle):
         try:
             await (tr.commit() if commit else tr.rollback())
         finally:
-            self._adapter._require_pool().release(conn)
+            # asyncpg 的 Pool.release 是协程：漏掉 await 时连接不会归还，
+            # 后续 acquire 逐步耗尽池（默认 max_size=5），最后 pool.close()
+            # 等一条永远回不来的连接而永久挂起。
+            await self._adapter._require_pool().release(conn)
 
     async def _commit(self) -> None:
         await self._finish(commit=True)
