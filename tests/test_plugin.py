@@ -231,7 +231,17 @@ async def test_mysql_crud_when_server_available():
         pytest.skip("NEKO_TEST_MYSQL_DSN not set")
     a = ADAPTERS["mysql"]()
     await a.connect({"dsn": dsn})
-    await a.execute("DROP TABLE IF EXISTS t", ())
+    # 不用 DROP TABLE IF EXISTS 清场：表不存在时 MySQL 会下发 warning 1051，
+    # aiomysql 把它转成 Python warning（cursors.py 的 _show_warnings），而本仓
+    # pytest 配了 filterwarnings = error，于是这条纯提示性的 note 会把用例打挂。
+    # 先查 information_schema 再删，既无 warning 也不依赖连接池的会话状态。
+    exists = await a.fetch_all(
+        "SELECT 1 FROM information_schema.tables"
+        " WHERE table_schema = DATABASE() AND table_name = 't'",
+        (),
+    )
+    if exists:
+        await a.execute("DROP TABLE t", ())
     await a.execute("CREATE TABLE t (id INT AUTO_INCREMENT PRIMARY KEY, v VARCHAR(64))", ())
     assert await a.execute("INSERT INTO t (v) VALUES (?)", ("a",)) == 1
     assert [r["v"] for r in await a.fetch_all("SELECT v FROM t", ())] == ["a"]
